@@ -43,7 +43,10 @@ def load_time_machine(seq_length=64, batch_size=1):
     print('Shape of label set: ', train_label.shape)
     
     return train_data, train_label
-    
+
+def load_english_to_french(seq_length=64,batch_size=1):
+    #2600L, 64L, 1L, 88L
+    path = "../../data/"
 
 def get_char_dict(data):
     # get character dictionary
@@ -53,6 +56,18 @@ def get_char_dict(data):
     character_dict = {}
     for e, char in enumerate(character_list):
         character_dict[char] = e
+    return character_dict, vocab_size
+
+def get_char_dict_builder(data, character_dict):
+    # get character dictionary
+    print "building dictionary"
+    for line in data:
+        character_list = list(set(line))
+        # get the character dictionary
+        for i in range(len(character_list)):
+            if(character_list[i] not in character_dict):
+                character_dict[character_list[i]] = len(character_dict)
+    vocab_size = len(character_dict)
     return character_dict, vocab_size
 
 def rnn_helper(num_hidden, vocab_size): 
@@ -95,6 +110,7 @@ def decoder(steps, encoder_outputs, state, num_hidden, vocab_size, params):
     Wxh, Whh, bh, Why, by = params
     outputs = []
     h = state
+    # only look at steps long. (consider this 'dynamic')
     for i in range(steps):
         h=nd.reshape(h,(1,h.size))
         yhat = softmax(nd.dot(nd.tanh(nd.dot(attention(h, encoder_outputs), Wxh) + nd.dot(h, Whh) + bh), Why) + by) 
@@ -117,87 +133,77 @@ def average_ce_loss(outputs, labels):
         total_loss = total_loss + cross_entropy(output, label)
     return total_loss / len(outputs)
 
-class decoder_layer(Block):
-    def __init__(self, steps, num_hidden, vocab_size):
-        super(encoder_layer, self).__init__(**kwargs)
-        with self.name_scope():
-            # layer meta information
-            self.steps = steps
-            self.num_hidden = num_hidden
-            self.vocab_size = vocab_size
-            self.num_inputs = vocab_size
-            self.num_outputs = vocab_size
-            
-            # initialize layer RNN parameters
-            self.Wxh = self.params.get('d_Wxh', shape=(self.num_inputs,num_hidden), init=mx.init.Xavier(magnitude=2.24))
-            self.Whh = self.params.get('d_Whh', shape=(num_hidden,num_hidden), init=mx.init.Xavier(magnitude=2.24))
-            self.bh = self.params.get('d_bh', shape=num_hidden)
-            self.Why = self.params.get('d_Why', shape=(num_hidden,self.num_outputs), init=mx.init.Xavier(magnitude=2.24))
-            self.by = self.params.get('d_by', shape=self.num_outputs)
-    def forward(self,input_data,hidden_state):
-        with input_data.context:
-            outputs = []
-            h=state
-            for i in range(input_data.shape[0]):
-                h_linear = nd.dot(attention(input_data[i]), Wxh) + nd.dot(h, Whh) + bh
-                h = nd.tanh(h_linear)
-                yhat_linear = nd.dot(h, Why) + by
-                yhat = softmax(yhat_linear) 
-                outputs.append(nd.expand_dims(yhat[0],axis=1))
-            return (outputs, h)
-
-class encoder_layer(Block):
-    def __init__(self, steps, num_hidden, vocab_size, **kwargs):
-        super(encoder_layer, self).__init__(**kwargs)
-        with self.name_scope():
-            # layer meta information
-            self.steps = steps
-            self.num_hidden = num_hidden
-            self.vocab_size = vocab_size
-            self.num_inputs = vocab_size
-            self.num_outputs = vocab_size
-            
-            # initialize layer RNN parameters
-            self.Wxh = self.params.get('e_Wxh', shape=(self.num_inputs,num_hidden), init=mx.init.Xavier(magnitude=2.24))
-            self.Whh = self.params.get('e_Whh', shape=(num_hidden,num_hidden), init=mx.init.Xavier(magnitude=2.24))
-            self.bh = self.params.get('e_bh', shape=num_hidden)
-            self.Why = self.params.get('e_Why', shape=(num_hidden,self.num_outputs), init=mx.init.Xavier(magnitude=2.24))
-            self.by = self.params.get('e_by', shape=self.num_outputs)
-    def forward(self,input_data, hidden_state):
-        with input_data.context:
-            outputs = []
-            h=state
-            for i in range(input_data.shape[0]):
-                h_linear = nd.dot(input_data[i], Wxh) + nd.dot(h, Whh) + bh
-                h = nd.tanh(h_linear)
-                yhat_linear = nd.dot(h, Why) + by
-                yhat = softmax(yhat_linear) 
-                outputs.append(nd.expand_dims(yhat[0],axis=1))
-            return (outputs, h)
         
 def list_to_nd_array(list_of_nd_arrays):
     return nd.concat(*list_of_nd_arrays)
 
-# context usage
-ctx = mx.cpu()
-data, labels = load_time_machine()
+def list_to_nd_array_with_reshaping(list_of_nd_arrays):
+    for i in range(len(list_of_nd_arrays)):
+        list_of_nd_arrays[i]=list_of_nd_arrays[i].reshape((list_of_nd_arrays[i].shape[0],1))
+    return nd.concat(*list_of_nd_arrays)
 
-num_hidden = 88
-steps = 64
-learning_rate = 0.01
-vocab_size = 88
+
+def translation_numerical(data,character_dict):
+    print "turning characters into numerical representation"
+    return_list=[]
+    for line in data:
+        return_list.append([character_dict[char] for char in line])
+    return return_list
+
+def numerical_to_nd(one_data,translation_dict):
+    one_hot = one_hots(one_data, len(translation_dict))
+    temp = one_hot.reshape((1,1,one_hot.shape[0],one_hot.shape[1]))
+    temp = nd.swapaxes(temp,0,1)
+    temp = nd.swapaxes(temp,1,2)
+    return temp
+
+
+ctx = mx.cpu()
+num_hidden = 192 #hardcoded dictionary size
+learning_rate = 0.1
+vocab_size = 192
 
 decoder_params = rnn_helper(num_hidden, vocab_size)
 encoder_params = rnn_helper(num_hidden, vocab_size)
 params = decoder_params + encoder_params
 
+# open the datasets
+with open("../../data/train.en","rb") as f:
+    train_data = f.read().splitlines()
+with open("../../data/train.fr","rb") as f:
+    train_labels = f.read().splitlines()
+
+# create dictionary and a character list 
+translation_dict = {}
+_, num_items = get_char_dict_builder(train_data,translation_dict)
+_, num_items = get_char_dict_builder(train_labels, translation_dict)
+character_list = list(translation_dict.keys())
+
+# from characters to numerical representations
+english_numerical=translation_numerical(train_data,translation_dict)
+french_numerical=translation_numerical(train_labels,translation_dict)
+
+#convenience
+data = english_numerical
+labels = french_numerical
+
+#train model
 for epoch in range(100):
-    for i in range(data.shape[0]):
+    for i in range(len(data)):
         with autograd.record():
-            output_encoder,hidden_encoder=encoder(steps, data[i], num_hidden, int(data.shape[3]), nd.zeros(num_hidden),encoder_params)
+            en = numerical_to_nd(data[i],translation_dict)
+            fr = numerical_to_nd(labels[i],translation_dict)
+            en = en.reshape((en.shape[1],en.shape[2],en.shape[3]))
+            fr = fr.reshape((fr.shape[1],fr.shape[2],fr.shape[3]))
+            
+            output_encoder,hidden_encoder=encoder(en.shape[0], en, num_hidden, int(en.shape[2]), nd.zeros(num_hidden),encoder_params)
             out_enc = list_to_nd_array(output_encoder)
-            output_decoder, hidden_state = decoder(steps,out_enc,nd.zeros(num_hidden),num_hidden,int(data.shape[3]),decoder_params)
-            loss = average_ce_loss(output_decoder, nd.reshape(labels[i],(64,88))) 
+            output_decoder, hidden_state = decoder(fr.shape[0],out_enc,nd.zeros(num_hidden),num_hidden,int(fr.shape[2]),decoder_params)
+            loss = average_ce_loss(output_decoder, nd.reshape(fr,(fr.shape[0],fr.shape[2]))) 
         loss.backward()
-        print decoder_params[0].grad
         SGD(params, learning_rate)
+        
+        if(i%100==0):
+            print textify(list_to_nd_array_with_reshaping(output_decoder))
+            print loss
+    
