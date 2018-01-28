@@ -3,8 +3,8 @@ import numpy as np
 from mxnet import nd, gluon, autograd
 from mxnet.gluon import nn, Block
 
-def one_hots(numerical_list, vocab_size):
-    result = nd.zeros((len(numerical_list), vocab_size), ctx=ctx)
+def one_hots(numerical_list, vocab_size, data_ctx):
+    result = nd.zeros((len(numerical_list), vocab_size), ctx=data_ctx)
     for i, idx in enumerate(numerical_list):
         result[i, idx] = 1.0
     return result
@@ -16,7 +16,7 @@ def textify(embedding):
         result += character_list[int(idx)]
     return result
 
-def load_time_machine(seq_length=64, batch_size=1):
+def load_time_machine(seq_length=64, batch_size=1, data_ctx=mx.cpu()):
     # loading dataset
     path = "../../data/timemachine.txt"
     with open(path) as f:
@@ -27,7 +27,7 @@ def load_time_machine(seq_length=64, batch_size=1):
     time_numerical = [character_dict[char] for char in time_machine]
     # -1 here so we have enough characters for labels later
     num_samples = (len(time_numerical) - 1) // seq_length
-    dataset = one_hots(time_numerical[:seq_length*num_samples],vocab_size).reshape((num_samples, seq_length, vocab_size))
+    dataset = one_hots(time_numerical[:seq_length*num_samples],vocab_size, data_ctx).reshape((num_samples, seq_length, vocab_size))
     num_batches = len(dataset) // batch_size
     train_data = dataset[:num_batches*batch_size].reshape((batch_size, num_batches, seq_length, vocab_size))
     
@@ -36,7 +36,7 @@ def load_time_machine(seq_length=64, batch_size=1):
     train_data = nd.swapaxes(train_data, 1, 2)
     print('Shape of data set: ', train_data.shape)
     
-    labels = one_hots(time_numerical[1:seq_length*num_samples+1], vocab_size)
+    labels = one_hots(time_numerical[1:seq_length*num_samples+1], vocab_size,data_ctx)
     train_label = labels.reshape((batch_size, num_batches, seq_length, vocab_size))
     train_label = nd.swapaxes(train_label, 0, 1)
     train_label = nd.swapaxes(train_label, 1, 2)
@@ -70,14 +70,14 @@ def get_char_dict_builder(data, character_dict):
     vocab_size = len(character_dict)
     return character_dict, vocab_size
 
-def rnn_helper(num_hidden, vocab_size): 
+def rnn_helper(num_hidden, vocab_size, model_ctx): 
     num_inputs = vocab_size
     num_outputs = vocab_size
-    Wxh = nd.random_normal(shape=(num_inputs,num_hidden), ctx=ctx) * .01
-    Whh = nd.random_normal(shape=(num_hidden,num_hidden), ctx=ctx) * .01
-    bh = nd.random_normal(shape=num_hidden, ctx=ctx) * .01
-    Why = nd.random_normal(shape=(num_hidden,num_outputs), ctx=ctx) * .01
-    by = nd.random_normal(shape=num_outputs, ctx=ctx) * .01
+    Wxh = nd.random_normal(shape=(num_inputs,num_hidden), ctx=model_ctx) * .01
+    Whh = nd.random_normal(shape=(num_hidden,num_hidden), ctx=model_ctx) * .01
+    bh = nd.random_normal(shape=num_hidden, ctx=model_ctx) * .01
+    Why = nd.random_normal(shape=(num_hidden,num_outputs), ctx=model_ctx) * .01
+    by = nd.random_normal(shape=num_outputs, ctx=model_ctx) * .01
     params = [Wxh, Whh, bh, Why, by]
 
     for param in params:
@@ -91,6 +91,7 @@ def softmax(y_linear):
 
 def encoder(steps, input_data, num_hidden, vocab_size, state, params):
     Wxh, Whh, bh, Why, by = params
+    input_data = input_data.as_in_context(Wxh.context)
     outputs = []
     h = state
     for i in range(input_data.shape[0]):
@@ -103,8 +104,8 @@ def encoder(steps, input_data, num_hidden, vocab_size, state, params):
 
 def attention(decoder_hidden_t, encoder_output):
     if(decoder_hidden_t.shape[1] != encoder_output.shape[0]):
-        encoder_output = encoder_output.T
-    return nd.dot(softmax(nd.dot(decoder_hidden_t, encoder_output)) , encoder_output.T)
+        return nd.dot(softmax(nd.dot(decoder_hidden_t, nd.reshape(encoder_output,(encoder_output.shape[1], encoder_output.shape[0])))), encoder_output)
+    return nd.dot(softmax(nd.dot(decoder_hidden_t, encoder_output)) , nd.reshape(encoder_output,(encoder_output.shape[1], encoder_output.shape[0])))
  
 def decoder(steps, encoder_outputs, state, num_hidden, vocab_size, params):
     Wxh, Whh, bh, Why, by = params
@@ -122,15 +123,18 @@ def SGD(params, lr):
         param[:] = param - lr * param.grad
         
 
-def cross_entropy(yhat, y):
+def cross_entropy(yhat, y, ctx):
+    yhat = yhat.as_in_context(ctx)
+    y = y.as_in_context(ctx)
+
     return - nd.mean(nd.sum(y * nd.log(yhat), axis=0, exclude=True))
 
 
-def average_ce_loss(outputs, labels):
+def average_ce_loss(outputs, labels, ctx):
     assert(len(outputs) == len(labels))
     total_loss = 0.
     for (output, label) in zip(outputs,labels):
-        total_loss = total_loss + cross_entropy(output, label)
+        total_loss = total_loss + cross_entropy(output, label, ctx)
     return total_loss / len(outputs)
 
         
@@ -150,28 +154,63 @@ def translation_numerical(data,character_dict):
         return_list.append([character_dict[char] for char in line])
     return return_list
 
-def numerical_to_nd(one_data,translation_dict):
-    one_hot = one_hots(one_data, len(translation_dict))
+def numerical_to_nd(one_data,translation_dict, data_ctx):
+    one_hot = one_hots(one_data, len(translation_dict), data_ctx)
     temp = one_hot.reshape((1,1,one_hot.shape[0],one_hot.shape[1]))
     temp = nd.swapaxes(temp,0,1)
     temp = nd.swapaxes(temp,1,2)
     return temp
 
+def clean_data(train_data, test_data, threshold_min, threshold_max):
+    print "cleaning data"
+    train_data_list = []
+    test_data_list = []
+    for train_line, test_line in zip(train_data,test_data):
+            train_line = train_line.lower()
+            test_line = test_line.lower()  
+            return_train_line = ""
+            return_test_line = ""
+            
+            for i in range(len(train_line)):
+                c = train_line[i]
+                if((ord(c)>=32 and ord(c)<=63) or (ord(c)>=96 and ord(c)<=127)):
+                    return_train_line = return_train_line + c
+                    
+            for i in range(len(test_line)):
+                c = test_line[i]
+                if((ord(c)>=32 and ord(c)<=63) or (ord(c)>=96 and ord(c)<=127)):
+                    return_test_line = return_test_line + c
+            
+            if(len(return_train_line)>=threshold_min and len(return_train_line)<=threshold_max):
+                train_data_list.append(return_train_line)
+                test_data_list.append(return_test_line)
+    return train_data_list,test_data_list
 
-ctx = mx.cpu()
-num_hidden = 192 #hardcoded dictionary size
-learning_rate = 0.1
-vocab_size = 192
+def pad_zeros(data_numerical):
+    print "padding zeros"
+    #first, find the maximum length of data.
+    max_len = 0
+    for line in data_numerical:
+        if(len(line)>max_len):
+            max_len = len(line)
+            
+    #iterate through each line and pad with zeros until length equals max_len
+    for i in range(len(data_numerical)):
+        data_numerical[i] = data_numerical[i] + [0]*(max_len - len(data_numerical[i]))
+    
+    return data_numerical
 
-decoder_params = rnn_helper(num_hidden, vocab_size)
-encoder_params = rnn_helper(num_hidden, vocab_size)
-params = decoder_params + encoder_params
+data_ctx = mx.cpu()
+model_ctx = mx.gpu()
 
 # open the datasets
 with open("../../data/train.en","rb") as f:
-    train_data = f.read().splitlines()
+    raw_train_data = f.read().splitlines()
 with open("../../data/train.fr","rb") as f:
-    train_labels = f.read().splitlines()
+    raw_train_labels = f.read().splitlines()
+
+#clean data
+train_data, train_labels = clean_data(raw_train_data, raw_train_labels, 100,150)
 
 # create dictionary and a character list 
 translation_dict = {}
@@ -183,27 +222,33 @@ character_list = list(translation_dict.keys())
 english_numerical=translation_numerical(train_data,translation_dict)
 french_numerical=translation_numerical(train_labels,translation_dict)
 
-#convenience
-data = english_numerical
-labels = french_numerical
+# pad zeros
+data = pad_zeros(english_numerical)
+labels = pad_zeros(french_numerical)
 
-#train model
+num_hidden = len(translation_dict)
+learning_rate = 0.1
+vocab_size = len(translation_dict)
+
+decoder_params = rnn_helper(num_hidden, vocab_size, model_ctx)
+encoder_params = rnn_helper(num_hidden, vocab_size, model_ctx)
+params = decoder_params + encoder_params
+
 for epoch in range(100):
     for i in range(len(data)):
         with autograd.record():
-            en = numerical_to_nd(data[i],translation_dict)
-            fr = numerical_to_nd(labels[i],translation_dict)
+            en = numerical_to_nd(data[i],translation_dict, data_ctx)
+            fr = numerical_to_nd(labels[i],translation_dict, data_ctx)
             en = en.reshape((en.shape[1],en.shape[2],en.shape[3]))
             fr = fr.reshape((fr.shape[1],fr.shape[2],fr.shape[3]))
             
-            output_encoder,hidden_encoder=encoder(en.shape[0], en, num_hidden, int(en.shape[2]), nd.zeros(num_hidden),encoder_params)
+            output_encoder,hidden_encoder=encoder(en.shape[0], en, num_hidden, int(en.shape[2]), nd.zeros(num_hidden,ctx=model_ctx),encoder_params)
             out_enc = list_to_nd_array(output_encoder)
-            output_decoder, hidden_state = decoder(fr.shape[0],out_enc,nd.zeros(num_hidden),num_hidden,int(fr.shape[2]),decoder_params)
-            loss = average_ce_loss(output_decoder, nd.reshape(fr,(fr.shape[0],fr.shape[2]))) 
+            output_decoder, hidden_state = decoder(fr.shape[0],out_enc,nd.zeros(num_hidden,ctx=model_ctx),num_hidden,int(fr.shape[2]),decoder_params)
+            loss = average_ce_loss(output_decoder, nd.reshape(fr,(fr.shape[0],fr.shape[2])),ctx=model_ctx) 
         loss.backward()
         SGD(params, learning_rate)
         
         if(i%100==0):
             print textify(list_to_nd_array_with_reshaping(output_decoder))
             print loss
-    
