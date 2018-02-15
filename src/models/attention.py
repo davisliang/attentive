@@ -11,7 +11,7 @@ def one_hots(numerical_list, vocab_size, data_ctx):
 
 def textify(embedding):
     result = ""
-    indices = nd.argmax(embedding, axis=1).asnumpy()
+    indices = nd.argmax(embedding, axis=0).asnumpy()
     for idx in indices:
         result += character_list[int(idx)]
     return result
@@ -73,11 +73,11 @@ def get_char_dict_builder(data, character_dict):
 def rnn_helper(num_hidden, vocab_size, model_ctx): 
     num_inputs = vocab_size
     num_outputs = vocab_size
-    Wxh = nd.random_normal(shape=(num_inputs,num_hidden), ctx=model_ctx) * .01
-    Whh = nd.random_normal(shape=(num_hidden,num_hidden), ctx=model_ctx) * .01
-    bh = nd.random_normal(shape=num_hidden, ctx=model_ctx) * .01
-    Why = nd.random_normal(shape=(num_hidden,num_outputs), ctx=model_ctx) * .01
-    by = nd.random_normal(shape=num_outputs, ctx=model_ctx) * .01
+    Wxh = nd.random_normal(1,0,shape=(num_inputs,num_hidden), ctx=model_ctx) 
+    Whh = nd.random_normal(1,0,shape=(num_hidden,num_hidden), ctx=model_ctx) 
+    bh = nd.random_normal(1,0,shape=num_hidden, ctx=model_ctx) 
+    Why = nd.random_normal(1,0,shape=(num_hidden,num_outputs), ctx=model_ctx) 
+    by = nd.random_normal(1,0,shape=num_outputs, ctx=model_ctx) 
     params = [Wxh, Whh, bh, Why, by]
 
     for param in params:
@@ -127,7 +127,7 @@ def cross_entropy(yhat, y, ctx):
     yhat = yhat.as_in_context(ctx)
     y = y.as_in_context(ctx)
 
-    return - nd.mean(nd.sum(y * nd.log(yhat), axis=0, exclude=True))
+    return - nd.sum(y * nd.log(yhat), axis=0, exclude=True)
 
 
 def average_ce_loss(outputs, labels, ctx):
@@ -173,12 +173,13 @@ def clean_data(train_data, test_data, threshold_min, threshold_max):
             
             for i in range(len(train_line)):
                 c = train_line[i]
-                if((ord(c)>=32 and ord(c)<=63) or (ord(c)>=96 and ord(c)<=127)):
+                #if((ord(c)>=32 and ord(c)<=63) or (ord(c)>=96 and ord(c)<=127)):
+                if((ord(c)==32) or (ord(c)>=97 and ord(c)<=122)):
                     return_train_line = return_train_line + c
                     
             for i in range(len(test_line)):
                 c = test_line[i]
-                if((ord(c)>=32 and ord(c)<=63) or (ord(c)>=96 and ord(c)<=127)):
+                if((ord(c)==32) or (ord(c)>=97 and ord(c)<=122)):
                     return_test_line = return_test_line + c
             
             if(len(return_train_line)>=threshold_min and len(return_train_line)<=threshold_max):
@@ -210,24 +211,26 @@ with open("../../data/train.fr","rb") as f:
     raw_train_labels = f.read().splitlines()
 
 #clean data
-train_data, train_labels = clean_data(raw_train_data, raw_train_labels, 100,150)
+train_data, train_labels = clean_data(raw_train_data, raw_train_labels, 100,200)
 
 # create dictionary and a character list 
 translation_dict = {}
 _, num_items = get_char_dict_builder(train_data,translation_dict)
 _, num_items = get_char_dict_builder(train_labels, translation_dict)
 character_list = list(translation_dict.keys())
-
+print("vocabulary: ",character_list)
 # from characters to numerical representations
 english_numerical=translation_numerical(train_data,translation_dict)
 french_numerical=translation_numerical(train_labels,translation_dict)
 
 # pad zeros
-data = pad_zeros(english_numerical)
-labels = pad_zeros(french_numerical)
+#data = pad_zeros(english_numerical)
+#labels = pad_zeros(french_numerical)
+data = english_numerical
+labels = french_numerical
 
 num_hidden = len(translation_dict)
-learning_rate = 0.1
+learning_rate = 0.01
 vocab_size = len(translation_dict)
 
 decoder_params = rnn_helper(num_hidden, vocab_size, model_ctx)
@@ -246,9 +249,13 @@ for epoch in range(100):
             out_enc = list_to_nd_array(output_encoder)
             output_decoder, hidden_state = decoder(fr.shape[0],out_enc,nd.zeros(num_hidden,ctx=model_ctx),num_hidden,int(fr.shape[2]),decoder_params)
             loss = average_ce_loss(output_decoder, nd.reshape(fr,(fr.shape[0],fr.shape[2])),ctx=model_ctx) 
+
         loss.backward()
         SGD(params, learning_rate)
         
         if(i%100==0):
-            print textify(list_to_nd_array_with_reshaping(output_decoder))
-            print loss
+            print("PRED: ", output_decoder[0])
+            print("TARG: ", fr[0])
+            print("grad: ", decoder_params[0])
+            print("pred text: ",textify(list_to_nd_array_with_reshaping(output_decoder)))
+            print("loss: ", loss)
